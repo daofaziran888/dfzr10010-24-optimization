@@ -1,6 +1,7 @@
 """示例数据：每个模块给几条不同状态的记录，方便起服务后立刻看到内容。"""
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 SEED_ROWS: dict[str, list[dict[str, Any]]] = {
@@ -525,7 +526,8 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
   'pending': True,
   'abnormal': True,
   '报告编号': 'STAT-0002',
-  '表名称': '表统计信息样例2',
+  '表名称': 'payments_2026Q3',
+  '迁移任务编号': 'MIGR-0004',
   '行总数': '表统计信息样例2',
   '文件总数': '表统计信息样例2',
   '总容量': '表统计信息样例2',
@@ -581,3 +583,93 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
   '迁移耗时': '数据迁移管理样例3',
   '任务状态': '数据迁移管理样例3'}]
 }
+
+
+# ---------------------------------------------------------------------------
+# 数据迁移分段校验示例：payments_2026Q3 共 32 段、每段 25 万行。
+# 源端和目标端按 payment_id 去重计数、amount 汇总对照；目标分区落在
+# event_date=2026-07-01 到 2026-09-30。第 9、10 段异常，第 11 段之后
+# 的已校验段仍然保留明确边界，迁移完成状态不能越过第 9 段。
+# ---------------------------------------------------------------------------
+
+SEGMENT_ROWS = 250_000
+PAYMENTS_SEGMENTS = 32
+PAYMENTS_PARTITION_START = date(2026, 7, 1)
+PAYMENTS_PARTITION_END = date(2026, 9, 30)
+PAYMENTS_ABNORMAL_SEGMENTS = (9, 10)
+
+
+def _partition_bounds(segment_no: int) -> tuple[str, str]:
+    """把 32 段均分到 92 天分区里，返回该段覆盖的起止日期。"""
+    total_days = (PAYMENTS_PARTITION_END - PAYMENTS_PARTITION_START).days + 1
+    span = total_days / PAYMENTS_SEGMENTS
+    start = PAYMENTS_PARTITION_START + timedelta(days=int((segment_no - 1) * span))
+    end = PAYMENTS_PARTITION_START + timedelta(days=int(segment_no * span) - 1)
+    return start.isoformat(), end.isoformat()
+
+
+def build_payments_segments() -> list[dict[str, Any]]:
+    """按段生成源目标一致性校验明细，异常段带可读原因，不阻挡后续段落库。"""
+    segments: list[dict[str, Any]] = []
+    for segment_no in range(1, PAYMENTS_SEGMENTS + 1):
+        start, end = _partition_bounds(segment_no)
+        offset = (segment_no - 1) * SEGMENT_ROWS
+        if segment_no in PAYMENTS_ABNORMAL_SEGMENTS:
+            source_rows = SEGMENT_ROWS
+            target_rows = SEGMENT_ROWS - 17
+            source_distinct = SEGMENT_ROWS
+            target_distinct = SEGMENT_ROWS - 23
+            source_amount = round(SEGMENT_ROWS * 128.40, 2)
+            target_amount = round(source_amount - 2_187.35, 2)
+            status = "异常"
+            reason = (
+                f"payment_id 唯一数少 {source_distinct - target_distinct}，"
+                f"amount 汇总少 {round(source_amount - target_amount, 2)}"
+            )
+        else:
+            source_rows = target_rows = SEGMENT_ROWS
+            source_distinct = target_distinct = SEGMENT_ROWS
+            source_amount = target_amount = round(SEGMENT_ROWS * 128.40, 2)
+            status = "已校验"
+            reason = ""
+        segments.append({
+            "段号": segment_no,
+            "行区间": f"{offset + 1}-{offset + SEGMENT_ROWS}",
+            "源端行数": source_rows,
+            "目标端行数": target_rows,
+            "源端 payment_id 唯一数": source_distinct,
+            "目标端 payment_id 唯一数": target_distinct,
+            "源端 amount 汇总": source_amount,
+            "目标端 amount 汇总": target_amount,
+            "目标分区": f"event_date={start}..{end}",
+            "校验状态": status,
+            "异常原因": reason,
+        })
+    return segments
+
+
+SEED_VALIDATION_ENTRY: dict[str, Any] = {
+    "id": 4,
+    "任务编号": "MIGR-0004",
+    "源表名": "payments_2026Q3",
+    "目标表名": "dwd_payments_2026Q3",
+    "迁移方式": "分段重跑",
+    "数据范围": "payment_id 1-8000000，event_date=2026-07-01..2026-09-30",
+    "校验规则": "payment_id 唯一数、amount 汇总",
+    "迁移耗时": "42 分钟",
+    "任务状态": "迁移中",
+    "status": "迁移中",
+    "pending": True,
+    "abnormal": True,
+    "批次号": "20260918-01",
+    "分段总数": PAYMENTS_SEGMENTS,
+    "分段行数": SEGMENT_ROWS,
+    "异常段": list(PAYMENTS_ABNORMAL_SEGMENTS),
+    "分段明细": build_payments_segments(),
+    "依赖源库": "mysql://payments-primary:3306/pay",
+    "依赖目标环境": "hive://warehouse/dwd",
+    "快照编号": "SNAP-0002",
+    "下一次续跑位置": "第 11 段 / 行 2500001",
+}
+
+SEED_ROWS["migrate"].append(dict(SEED_VALIDATION_ENTRY))

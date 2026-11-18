@@ -14,6 +14,15 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 迁移一致性校验的附属数据不单独算业务模块，避免污染运营概览。
+        # 校验结果按迁移任务保存成版本历史；核对清单每个迁移任务只保留一条可继续边界。
+        self.validations: dict[int, list[dict[str, Any]]] = {}
+        # 当前生效版本单独记指针：重新选中旧版本时不会被后追加的版本盖住。
+        self.active_validations: dict[int, int] = {}
+        self.checklists: dict[int, dict[str, Any]] = {}
+        self.migration_runs: dict[int, dict[str, Any]] = {}
+        # 表统计信息按 (统计报告, 迁移任务, 批次) 消费同一个校验版本。
+        self.stats_batches: dict[tuple[int, int, str], dict[str, Any]] = {}
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)

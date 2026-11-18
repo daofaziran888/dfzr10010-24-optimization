@@ -30,6 +30,13 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出表统计信息清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "stats", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条统计报告明细；不存在时给出可读的错误说明。"""
@@ -37,6 +44,35 @@ def get_entry(entry_id: int) -> dict:
     if entry is None:
         raise HTTPException(status_code=404, detail=f"统计报告 {entry_id} 不存在或已归档")
     return entry
+
+
+@router.get("/{entry_id}/validation", response_model=dict)
+def get_validation(entry_id: int, task: str | None = Query(default=None, description="迁移任务编号"), version: int | None = Query(default=None, description="校验版本，缺省为当前版本")) -> dict:
+    """读取与迁移模块同一份源目标一致性校验结果；给旧版本号时用于核对旧批次。"""
+    if service.get_entry(entry_id) is None:
+        raise HTTPException(status_code=404, detail=f"统计报告 {entry_id} 不存在或已归档")
+    item = service.get_validation(entry_id, task_ref=task, version=version)
+    if item is None:
+        raise HTTPException(status_code=404, detail="统计报告关联的迁移任务没有可用的源目标一致性校验结果")
+    return item
+
+
+@router.get("/{entry_id}/batches", response_model=dict)
+def list_batches(entry_id: int, task: str | None = Query(default=None)) -> dict:
+    """按批次查看统计模块记录的行数与异常段。"""
+    if service.get_entry(entry_id) is None:
+        raise HTTPException(status_code=404, detail=f"统计报告 {entry_id} 不存在或已归档")
+    items = service.list_batches(entry_id, task_ref=task)
+    return {"report": entry_id, "total": len(items), "items": items}
+
+
+@router.post("/{entry_id}/collect", response_model=ActionResult)
+def collect_batch(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """按批次采集统计：读取当前校验版本的行数与异常段，并把结论回写迁移核对清单。"""
+    record, message = service.collect_batch(entry_id, payload.values)
+    if record is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=record)
 
 
 @router.post("", response_model=ActionResult)
@@ -56,10 +92,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出表统计信息清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "stats", "total": total, "items": items}
